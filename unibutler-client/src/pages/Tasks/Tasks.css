@@ -1,0 +1,19 @@
+.tasks { display:block; }
+.tasks__title { margin: 4px 0 16px; font-size: 22px; font-weight: 800; }
+.tasks__error { color:#dc2626; margin-bottom: 12px; }
+.tasks__card { background:#fff; border:1px solid #e5e7eb; border-radius:14px; padding:12px; margin-bottom: 12px; }
+.tasks__form { display:flex; gap:8px; align-items:center; flex-wrap: wrap; }
+.tasks__input { padding:10px 12px; border:1px solid #e5e7eb; border-radius:10px; outline:none; }
+.tasks__input:focus { border-color:#2563eb; }
+.tasks__btn { background:#2563eb; color:#fff; border:none; border-radius:10px; padding:10px 14px; font-weight:700; cursor:pointer; }
+.tasks__btn:hover { background:#1d4ed8; }
+.tasks__btn--danger { background:#ef4444; }
+.tasks__btn--danger:hover { background:#dc2626; }
+.tasks__loading { color:#6b7280; }
+.tasks__list { display:flex; flex-direction:column; gap:8px; }
+.tasks__item { display:flex; justify-content:space-between; align-items:center; border:1px solid #e5e7eb; border-radius:12px; padding:10px; background:#fff; }
+.tasks__itemTitle { font-weight:700; }
+.tasks__itemMeta { color:#6b7280; font-size:14px; }
+.tasks__itemActions { display:flex; gap:8px; align-items:center; }
+.tasks__select { padding:8px 10px; border:1px solid #e5e7eb; border-radius:10px; }
+.tasks__empty { color:#6b7280; text-align:center; padding: 16px; }

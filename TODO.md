@@ -1,0 +1,5 @@
+- [x] Set onboardingCompleted to true by default in User.java
+- [x] Update AuthService.register to set onboardingCompleted to true
+- [x] Remove onboarding logic from ProtectedRoute.jsx
+- [x] Remove onboarding route from App.jsx
+- [ ] Verify schedule import in Dashboard.jsx works
