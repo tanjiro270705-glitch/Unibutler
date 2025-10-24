@@ -1,19 +1,25 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import "./Dashboard.css";
-import { api, ApiError } from "../../shared/api";
+import { api, ApiError, API_BASE } from "../../shared/api";
+import { getFilePreviewUrl } from "../../shared/upload";
 import {
-  LineChart,
-  Line,
-  CartesianGrid,
-  XAxis,
-  YAxis,
-  Tooltip,
-  ResponsiveContainer,
-  Legend,
+  LineChart, Line, CartesianGrid, XAxis, YAxis, Tooltip,
+  ResponsiveContainer, Legend,
 } from "recharts";
 import { on, AppEvents } from "../../shared/events";
 import ImageUpload from "../../components/ImageUpload/ImageUpload";
+
+const STORAGE_KEY = "dashboard.uploadedImages";
+
+// Build absolute URL từ id/path/relative -> http://host/uploads/...
+function toAbsoluteUploads(u) {
+  if (!u) return null;
+  if (/^(https?:)?\/\//i.test(u) || String(u).startsWith("blob:") || String(u).startsWith("data:")) return String(u);
+  const base = (API_BASE || "").replace(/\/+$/, "").replace(/\/api$/i, ""); // http://localhost:8080
+  const path = String(u).startsWith("/uploads/") ? String(u) : `/uploads/${String(u).replace(/^\/+/, "")}`;
+  return `${base}${path}`;
+}
 
 export default function Dashboard() {
   const [summary, setSummary] = useState(null);
@@ -21,25 +27,27 @@ export default function Dashboard() {
   const [growth, setGrowth] = useState([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
+  // uploadedImages: [{ url, _revoke?: fn }]
   const [uploadedImages, setUploadedImages] = useState([]);
   const nav = useNavigate();
+  const mountedRef = useRef(true);
 
   async function loadAll({ silent = false } = {}) {
     if (!silent) {
       setLoading(true);
       setErr("");
     }
-
     try {
       const [s, g] = await Promise.all([
         api("/dashboard/weekly-summary"),
         api("/dashboard/growth"),
       ]);
 
+      // suggestions có thể timeout => fallback
       let sug = [];
       try {
         const res = await api("/suggestions", { timeoutMs: 20000 });
-        sug = res.items || [];
+        sug = res?.items || [];
       } catch (suggestionError) {
         console.warn("Failed to load suggestions:", suggestionError);
         sug = [
@@ -52,7 +60,8 @@ export default function Dashboard() {
         ];
       }
 
-      setSummary(s);
+      if (!mountedRef.current) return;
+      setSummary(s || null);
       setGrowth(Array.isArray(g) ? g : []);
       setSuggestions(sug);
     } catch (e) {
@@ -60,27 +69,132 @@ export default function Dashboard() {
         nav("/login", { replace: true });
         return;
       }
-      setErr(e.message || "Failed to load dashboard");
+      console.warn("Dashboard load error:", e);
+      // Đừng show “Not Found” đỏ khi chỉ thiếu dữ liệu
+      setErr("");
     } finally {
-      setLoading(false);
+      if (mountedRef.current) setLoading(false);
     }
   }
 
   useEffect(() => {
-    let mounted = true;
+    mountedRef.current = true;
     loadAll();
 
+    // Rehydrate ảnh từ localStorage
+    try {
+      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+      if (Array.isArray(saved) && saved.length) setUploadedImages(saved);
+    } catch {}
+
+    // auto-refresh khi task thay đổi
     const off = on(AppEvents.TASKS_CHANGED, () => {
-      if (!mounted) return;
+      if (!mountedRef.current) return;
       loadAll({ silent: true });
     });
 
     return () => {
-      mounted = false;
+      mountedRef.current = false;
       off();
+      // chỉ revoke blob:, KHÔNG reset mảng (để quay lại vẫn còn)
+      uploadedImages.forEach((img) => {
+        try {
+          if (img?._revoke && String(img.url).startsWith("blob:")) img._revoke();
+        } catch {}
+      });
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Persist ảnh có URL công khai (http/https) để đổi trang quay lại vẫn còn
+  useEffect(() => {
+    const persistable = uploadedImages.filter((i) => /^https?:\/\//i.test(String(i.url)));
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(persistable));
+    } catch {}
+  }, [uploadedImages]);
+
+  // Nhận kết quả upload từ ImageUpload: string URL | id | path | object | File/Blob
+  const handleUploadComplete = async (payload) => {
+    try {
+      if (!payload) throw new Error("Empty upload payload");
+
+      // a) String: có thể là URL/id/path
+      if (typeof payload === "string") {
+        const url = toAbsoluteUploads(payload);
+        if (url) {
+          setUploadedImages((prev) => [...prev, { url }]);
+          return;
+        }
+      }
+
+      // b) File/Blob -> blob URL tạm
+      const isFile =
+        (typeof File !== "undefined" && payload instanceof File) ||
+        (typeof Blob !== "undefined" && payload instanceof Blob);
+      if (isFile) {
+        const url = URL.createObjectURL(payload);
+        setUploadedImages((prev) => [...prev, { url, _revoke: () => URL.revokeObjectURL(url) }]);
+        return;
+      }
+
+      // c) Object có sẵn url/previewUrl/fileUrl/publicUrl
+      if (payload && typeof payload === "object") {
+        const direct = payload.url || payload.previewUrl || payload.fileUrl || payload.publicUrl;
+        if (typeof direct === "string" && direct) {
+          setUploadedImages((prev) => [...prev, { url: toAbsoluteUploads(direct) }]);
+          return;
+        }
+
+        // d) Object có path/filePath/key/id/filename/savedName/storageKey/imageId
+        const pathLike =
+          payload.path ||
+          payload.filePath ||
+          payload.key ||
+          payload.id ||
+          payload.imageId ||
+          payload.filename ||
+          payload.savedName ||
+          payload.storageKey;
+        if (typeof pathLike === "string" && pathLike) {
+          setUploadedImages((prev) => [...prev, { url: toAbsoluteUploads(pathLike) }]);
+          return;
+        }
+
+        // e) Nếu ImageUpload trả { file, result: { url } } -> thay blob bằng URL server
+        if (payload.result?.url) {
+          const url = toAbsoluteUploads(payload.result.url);
+          setUploadedImages((prev) => [...prev, { url }]);
+          return;
+        }
+
+        // f) Fallback: thử string đầu tiên trong object
+        const anyString = Object.values(payload).find((v) => typeof v === "string" && v.length);
+        if (anyString) {
+          const url = toAbsoluteUploads(anyString);
+          if (url) {
+            setUploadedImages((prev) => [...prev, { url }]);
+            console.warn("Preview used fallback string from payload:", payload);
+            return;
+          }
+        }
+      }
+
+      // g) Thử helper preview (nếu có cơ chế riêng trên BE)
+      const preview = await getFilePreviewUrl(payload);
+      if (preview && preview.url) {
+        setUploadedImages((prev) => [...prev, { url: preview.url, _revoke: preview.revoke }]);
+        return;
+      }
+
+      console.warn("Cannot derive preview URL from payload:", payload);
+      // Không setErr để tránh đỏ cả trang chỉ vì preview
+    } catch (e) {
+      console.error("Make preview failed:", e, "payload=", payload);
+      // Không đẩy lỗi ra UI để tránh UX xấu
+      // setErr("Cannot preview uploaded image. Please try again.");
+    }
+  };
 
   return (
     <div className="dashboard">
@@ -97,20 +211,14 @@ export default function Dashboard() {
             <div className="dashboard__loading">Loading…</div>
           ) : summary ? (
             <div className="dashboard__metrics">
-              <Metric
-                label="Tasks done"
-                value={`${summary.tasksDone || 0}/${summary.tasksTotal || 0}`}
-              />
-              <Metric
-                label="Productivity"
-                value={`${Number(summary.productivityScore || 0).toFixed(0)}%`}
-              />
+              <Metric label="Tasks done"
+                      value={`${summary.tasksDone || 0}/${summary.tasksTotal || 0}`} />
+              <Metric label="Productivity"
+                      value={`${Number(summary.productivityScore || 0).toFixed(0)}%`} />
               <Metric label="Avg stress" value={Number(summary.avgStress || 0).toFixed(1)} />
               <Metric label="Avg mood" value={Number(summary.avgMood || 0).toFixed(1)} />
-              <Metric
-                label="Best study window"
-                value={summary.bestStudyWindow || "9:00 AM - 12:00 PM"}
-              />
+              <Metric label="Best study window"
+                      value={summary.bestStudyWindow || "9:00 AM - 12:00 PM"} />
               <div className="dashboard__tip">💡 {summary.tip || "Keep going!"}</div>
             </div>
           ) : (
@@ -132,7 +240,9 @@ export default function Dashboard() {
                 <li key={i} className="dashboard__listItem">
                   <div className="dashboard__listType">{s.type}</div>
                   <div className="dashboard__listTitle">{s.title}</div>
-                  <div className="dashboard__listMeta">{s.when} • {s.where}</div>
+                  <div className="dashboard__listMeta">
+                    {s.when} • {s.where}
+                  </div>
                 </li>
               ))}
 
@@ -151,23 +261,17 @@ export default function Dashboard() {
       <section className="dashboard__images">
         <h2 className="dashboard__images-title">Your Images</h2>
 
-        <ImageUpload
-          onUploadComplete={(imageUrl) => {
-            setUploadedImages((prev) => [...prev, imageUrl]);
-          }}
-        />
+        <ImageUpload onUploadComplete={handleUploadComplete} />
 
-        {uploadedImages.length > 0 && (
+        {uploadedImages.length > 0 ? (
           <div className="dashboard__images-grid">
-            {uploadedImages.map((url, index) => (
+            {uploadedImages.map((img, index) => (
               <div key={index} className="dashboard__image-card">
-                <img src={url} alt={`Uploaded ${index + 1}`} />
+                <img src={img.url} alt={`Uploaded ${index + 1}`} />
               </div>
             ))}
           </div>
-        )}
-
-        {uploadedImages.length === 0 && (
+        ) : (
           <div className="dashboard__empty">
             <p>No images uploaded yet.</p>
             <p>Upload your first image using the button above!</p>
@@ -205,15 +309,9 @@ export default function Dashboard() {
           <div className="dashboard__insights">
             <h3 className="dashboard__insightsTitle">📈 AI Insights</h3>
             <ul className="dashboard__insightsList">
-              <li>
-                🧠 Best study window: <strong>{summary.bestStudyWindow || "9:00 AM - 12:00 PM"}</strong>
-              </li>
-              <li>
-                💆 Stress peak day: <strong>{summary.stressPeakDay || "No data yet"}</strong>
-              </li>
-              <li>
-                🚀 Early completion boost: <strong>{summary.earlyCompletionBoost || 0}%</strong>
-              </li>
+              <li>🧠 Best study window: <strong>{summary.bestStudyWindow || "9:00 AM - 12:00 PM"}</strong></li>
+              <li>💆 Stress peak day: <strong>{summary.stressPeakDay || "No data yet"}</strong></li>
+              <li>🚀 Early completion boost: <strong>{summary.earlyCompletionBoost || 0}%</strong></li>
             </ul>
           </div>
         )}
