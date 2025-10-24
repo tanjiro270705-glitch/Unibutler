@@ -15,10 +15,31 @@ const STORAGE_KEY = "dashboard.uploadedImages";
 // Build absolute URL từ id/path/relative -> http://host/uploads/...
 function toAbsoluteUploads(u) {
   if (!u) return null;
-  if (/^(https?:)?\/\//i.test(u) || String(u).startsWith("blob:") || String(u).startsWith("data:")) return String(u);
+  const s = String(u);
+  if (/^(https?:)?\/\//i.test(s) || s.startsWith("blob:") || s.startsWith("data:")) return s;
   const base = (API_BASE || "").replace(/\/+$/, "").replace(/\/api$/i, ""); // http://localhost:8080
-  const path = String(u).startsWith("/uploads/") ? String(u) : `/uploads/${String(u).replace(/^\/+/, "")}`;
+  const path = s.startsWith("/uploads/") ? s : `/uploads/${s.replace(/^\/+/, "")}`;
   return `${base}${path}`;
+}
+
+// URL có phải file server /uploads không
+function isServerUpload(url) {
+  try {
+    const u = new URL(url, window.location.origin);
+    return u.pathname.startsWith("/uploads/");
+  } catch { return false; }
+}
+
+// (tuỳ chọn) gọi BE xoá file thật nếu có endpoint DELETE /api/uploads?path=uploads/xxx
+async function deleteOnServer(url) {
+  try {
+    if (!isServerUpload(url)) return;
+    const u = new URL(url, window.location.origin);
+    const path = u.pathname.replace(/^\/+/, ""); // uploads/xxx.jpg
+    await api(`/uploads?path=${encodeURIComponent(path)}`, { method: "DELETE" });
+  } catch (e) {
+    console.warn("Delete server file failed (ignored):", e);
+  }
 }
 
 export default function Dashboard() {
@@ -70,7 +91,7 @@ export default function Dashboard() {
         return;
       }
       console.warn("Dashboard load error:", e);
-      // Đừng show “Not Found” đỏ khi chỉ thiếu dữ liệu
+      // Đừng show lỗi đỏ khi chỉ thiếu dữ liệu
       setErr("");
     } finally {
       if (mountedRef.current) setLoading(false);
@@ -196,6 +217,29 @@ export default function Dashboard() {
     }
   };
 
+  // Xoá 1 ảnh (UI + localStorage + revoke blob + (tuỳ chọn) xoá server)
+  const handleRemoveImage = (idx) => {
+    setUploadedImages((prev) => {
+      const copy = [...prev];
+      const removed = copy[idx];
+      // revoke blob nếu có
+      try {
+        if (removed?._revoke && String(removed.url).startsWith("blob:")) removed._revoke();
+      } catch {}
+      copy.splice(idx, 1);
+      // cập nhật localStorage
+      try {
+        const persistable = copy.filter((i) => /^https?:\/\//i.test(String(i.url)));
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(persistable));
+      } catch {}
+      // (tuỳ chọn) xoá file thật trên server
+      if (removed?.url && isServerUpload(removed.url)) {
+        deleteOnServer(removed.url);
+      }
+      return copy;
+    });
+  };
+
   return (
     <div className="dashboard">
       <h1 className="dashboard__title">Your Week Overview</h1>
@@ -267,6 +311,15 @@ export default function Dashboard() {
           <div className="dashboard__images-grid">
             {uploadedImages.map((img, index) => (
               <div key={index} className="dashboard__image-card">
+                <button
+                  type="button"
+                  className="dashboard__image-delete"
+                  aria-label="Delete image"
+                  title="Delete"
+                  onClick={() => handleRemoveImage(index)}
+                >
+                  ×
+                </button>
                 <img src={img.url} alt={`Uploaded ${index + 1}`} />
               </div>
             ))}
